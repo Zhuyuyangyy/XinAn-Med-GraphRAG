@@ -1,9 +1,15 @@
-"""GraphRAG Engine - Retrieve-and-Generate pipeline combining BM25 + graph context."""
+"""GraphRAG Engine - Retrieve-and-Generate pipeline combining BM25 + graph context.
+
+Now integrated with AncientChineseNER and TerminologyAligner for enhanced
+ancient TCM text understanding over the expanded 120+ node knowledge graph.
+"""
 import math
 import re
 from collections import Counter
 from typing import Optional
 from backend.models.xinan_kg import XinAnKnowledgeGraph
+from backend.models.ancient_ner import AncientChineseNER
+from backend.models.terminology_aligner import TerminologyAligner
 
 
 class BM25Index:
@@ -50,7 +56,9 @@ class BM25Index:
                     continue
                 n_t = self.df.get(t, 0)
                 idf = math.log((self.N - n_t + 0.5) / (n_t + 0.5) + 1)
-                tf_val = (tf[t] * (self.k1 + 1)) / (tf[t] + self.k1 * (1 - self.b + self.b * dl / (self.avg_dl or 1)))
+                tf_val = (tf[t] * (self.k1 + 1)) / (
+                    tf[t] + self.k1 * (1 - self.b + self.b * dl / (self.avg_dl or 1))
+                )
                 s += idf * tf_val
             if s > 0:
                 scores.append((self.doc_ids[idx], s))
@@ -59,11 +67,19 @@ class BM25Index:
 
 
 class GraphRAGEngine:
-    """Retrieve-and-Generate pipeline for XinAn medical knowledge."""
+    """Retrieve-and-Generate pipeline for XinAn medical knowledge.
+
+    Enhanced with:
+        - NER-aware query expansion  (AncientChineseNER)
+        - Terminology alignment       (TerminologyAligner)
+        - Multi-hop graph traversal    (up to 2 hops)
+    """
 
     def __init__(self, kg: Optional[XinAnKnowledgeGraph] = None):
         self.kg = kg or XinAnKnowledgeGraph()
         self.bm25 = BM25Index()
+        self.ner = AncientChineseNER()
+        self.aligner = TerminologyAligner()
         self._build_index()
 
     def _build_index(self):
@@ -77,9 +93,29 @@ class GraphRAGEngine:
         for node in self.kg.graph.nodes:
             self.bm25.add(f"node:{node}", node)
 
+    # ------------------------------------------------------------------ #
+    #  Enhanced retrieve with NER + alignment
+    # ------------------------------------------------------------------ #
     def retrieve(self, query: str, top_k: int = 8) -> list[dict]:
-        """BM25 retrieve relevant triples, then expand with graph neighbors."""
-        bm25_hits = self.bm25.score(query, top_k=top_k)
+        """BM25 retrieve relevant triples, expand with 1-2 hop graph neighbors.
+
+        Uses NER to detect entities in the query and terminology alignment
+        to map ancient terms to their modern equivalents.
+        """
+        # 1) NER expansion: find entities in query, add to search terms
+        detected = self.ner.extract_from_text(query)
+        expanded_terms = set()
+        for ent, _, _ in detected:
+            expanded_terms.add(ent)
+            modern = self.aligner.align_term(ent)
+            if modern:
+                expanded_terms.add(modern)
+
+        # Build expanded query string
+        expanded_query = query + " " + " ".join(expanded_terms)
+
+        # 2) BM25 retrieval with expanded query
+        bm25_hits = self.bm25.score(expanded_query, top_k=top_k)
         seen_entities: set[str] = set()
         context_triples: list[dict] = []
 
@@ -92,10 +128,19 @@ class GraphRAGEngine:
                 subj, obj = parts[0], parts[1]
                 edge_data = self.kg.graph.get_edge_data(subj, obj) or {}
                 rel = edge_data.get("relation", "")
-                context_triples.append({"subject": subj, "relation": rel, "object": obj, "score": sc})
+                context_triples.append({
+                    "subject": subj, "relation": rel,
+                    "object": obj, "score": sc
+                })
                 seen_entities.update([subj, obj])
 
-        # Graph expansion: 1-hop neighbors of matched entities
+        # Also search for NER-detected entities in the graph
+        for ent, _, _ in detected:
+            matches = self.kg.search(ent)
+            for m in matches:
+                seen_entities.add(m)
+
+        # 3) Graph expansion: 1-hop neighbors of matched entities
         for entity in list(seen_entities):
             neighbors = self.kg.get_neighbors(entity)
             for edge in neighbors["outgoing"]:
@@ -103,6 +148,14 @@ class GraphRAGEngine:
                     "subject": entity, "relation": edge["relation"],
                     "object": edge["target"], "score": 0.1
                 })
+                # 2-hop expansion for high-value entities
+                if entity in expanded_terms:
+                    second = self.kg.get_neighbors(edge["target"])
+                    for e2 in second["outgoing"]:
+                        context_triples.append({
+                            "subject": edge["target"], "relation": e2["relation"],
+                            "object": e2["target"], "score": 0.05
+                        })
             for edge in neighbors["incoming"]:
                 context_triples.append({
                     "subject": edge["source"], "relation": edge["relation"],
@@ -127,14 +180,29 @@ class GraphRAGEngine:
         for i, t in enumerate(context_triples[:10], 1):
             lines.append(f"  {i}. {t['subject']} —[{t['relation']}]→ {t['object']}")
         lines.append(f"\n共检索到 {len(context_triples)} 条相关三元组。")
+
+        # Add NER-detected entities summary
+        detected = self.ner.extract_from_text(query)
+        if detected:
+            lines.append("\n识别到的实体：")
+            for ent, etype, _ in detected:
+                modern = self.aligner.align_term(ent)
+                if modern:
+                    lines.append(f"  - {ent} ({etype}) → 现代术语: {modern}")
+                else:
+                    lines.append(f"  - {ent} ({etype})")
+
         return "\n".join(lines)
 
     def query(self, question: str, top_k: int = 8) -> dict:
-        """Full RAG pipeline: retrieve -> generate."""
+        """Full RAG pipeline: NER -> align -> retrieve -> generate."""
+        # Align ancient terms in the question
+        aligned_question = self.aligner.align_text(question)
         triples = self.retrieve(question, top_k=top_k)
         answer = self.generate(question, triples)
         return {
             "question": question,
+            "aligned_question": aligned_question,
             "answer": answer,
             "context_triples": triples,
             "triple_count": len(triples),
