@@ -4,7 +4,13 @@ import networkx as nx
 
 
 class XinAnKnowledgeGraph:
-    """Knowledge graph for XinAn Traditional Chinese Medicine."""
+    """Knowledge graph for XinAn Traditional Chinese Medicine.
+
+    NOTE: All knowledge graph data is hand-authored as Python tuples in this
+    file. It is NOT automatically extracted from texts. The graph contains
+    120+ nodes and 200+ edges covering medical masters, formulas, herbs,
+    syndromes, academic schools, and classical texts from the XinAn TCM school.
+    """
 
     def __init__(self):
         self.graph = nx.DiGraph()

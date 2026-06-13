@@ -67,7 +67,12 @@ class BM25Index:
 
 
 class GraphRAGEngine:
-    """Retrieve-and-Generate pipeline for XinAn medical knowledge.
+    """BM25 keyword retrieval + graph traversal pipeline for XinAn medical knowledge.
+
+    NOTE: Despite the class name "GraphRAG", this is NOT a vector-based or
+    LLM-based GraphRAG system. It uses BM25 keyword matching over a manually
+    curated knowledge graph, with NER-based query expansion and 1-2 hop
+    graph neighbor traversal. The name is retained for project continuity.
 
     Enhanced with:
         - NER-aware query expansion  (AncientChineseNER)
